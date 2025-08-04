@@ -26,7 +26,7 @@ def get_story_links(max_pages=3):
     for page in range(max_pages):
         url = f"{base}/newsfeed?page={page}"
         try:
-            resp = requests.get(url, headers=headers, timeout=30)
+            resp = requests.get(url, headers=headers, timeout=60)
             soup = BeautifulSoup(resp.text, 'html.parser')
             for a in soup.select('a.story-title'):
                 href = a.get('href')
