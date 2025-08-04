@@ -20,10 +20,13 @@ def get_story_links(max_pages=3):
     """Crawl Scimex newsfeed for story links"""
     links = set()
     base = "https://www.scimex.org"
+    headers = {
+        "User-Agent": "Mozilla/5.0"
+    }
     for page in range(max_pages):
         url = f"{base}/newsfeed?page={page}"
         try:
-            resp = requests.get(url, timeout=30)
+            resp = requests.get(url, headers=headers, timeout=30)
             soup = BeautifulSoup(resp.text, 'html.parser')
             for a in soup.select('a.story-title'):
                 href = a.get('href')
@@ -35,17 +38,31 @@ def get_story_links(max_pages=3):
     return sorted(list(links))
 
 def extract_dois_from_story(url):
-    """Scrape a story page and extract DOIs"""
+    """Extract DOIs and story title from a Scimex article page"""
     try:
-        resp = requests.get(url, timeout=10)
+        headers = {
+            "User-Agent": "Mozilla/5.0"
+        }
+        resp = requests.get(url, headers=headers, timeout=15)
         soup = BeautifulSoup(resp.text, 'html.parser')
-        text = soup.get_text()
-        return re.findall(r'10\.\d{4,9}/[-._;()/:A-Z0-9]+', text, re.IGNORECASE)
-    except Exception as e:
-        st.error(f"Error scraping {url}: {e}")
-        return []
 
-# --- Streamlit UI ---
+        # Get the story title
+        title_tag = soup.find("h1", class_="title")
+        title = title_tag.get_text(strip=True) if title_tag else "Unknown Title"
+
+        # Look inside all div.item elements for DOIs
+        dois = []
+        for div in soup.find_all("div", class_="item"):
+            text = div.get_text()
+            found = re.findall(r'10\.\d{4,9}/[-._;()/:A-Z0-9]+', text, re.IGNORECASE)
+            dois.extend([doi.lower() for doi in found])
+
+        return title, list(set(dois))  # remove duplicates
+    except Exception as e:
+        st.warning(f"Error scraping {url}: {e}")
+        return "Error", []
+
+# --- Streamlit App UI ---
 st.title("🔬 Scimex Retraction Checker")
 st.markdown("This app checks Scimex stories for DOIs that appear on the [Retraction Watch](https://retractionwatch.com) list.")
 
@@ -63,11 +80,14 @@ if st.button("🔍 Run check"):
     matches = []
     progress = st.progress(0)
     for i, link in enumerate(story_links):
-        found_dois = extract_dois_from_story(link)
+        title, found_dois = extract_dois_from_story(link)
         for doi in found_dois:
-            doi_clean = doi.strip().lower()
-            if doi_clean in retracted_dois:
-                matches.append({"DOI": doi_clean, "Story URL": link})
+            if doi in retracted_dois:
+                matches.append({
+                    "Title": title,
+                    "DOI": doi,
+                    "URL": link
+                })
         progress.progress((i + 1) / len(story_links))
         time.sleep(0.5)
 
