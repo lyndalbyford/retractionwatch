@@ -1,102 +1,74 @@
 import streamlit as st
-import pandas as pd
+import re
 import requests
 from bs4 import BeautifulSoup
-import re
-import time
-from urllib.parse import urljoin
 
-st.set_page_config(page_title="Scimex Retraction Checker", layout="wide")
-
-# --- Functions ---
-@st.cache_data(ttl=86400)
-def load_retracted_dois():
-    """Load the Retraction Watch DOI list"""
-    url = "https://gitlab.com/crossref/retraction-watch-data/-/raw/main/retraction_watch.csv"
-    df = pd.read_csv(url)
-    return set(df['RetractionDOI'].dropna().str.strip().str.lower())
-
-def get_story_links(max_pages=3):
-    """Crawl Scimex newsfeed for story links"""
-    links = set()
-    base = "https://www.scimex.org"
-    headers = {
-        "User-Agent": "Mozilla/5.0"
-    }
-    for page in range(max_pages):
-        url = f"{base}/newsfeed?page={page}"
-        try:
-            resp = requests.get(url, headers=headers, timeout=60)
-            soup = BeautifulSoup(resp.text, 'html.parser')
-            for a in soup.select('a.story-title'):
-                href = a.get('href')
-                if href and href.startswith("/newsfeed"):
-                    links.add(urljoin(base, href))
-        except Exception as e:
-            st.warning(f"Error fetching page {page}: {e}")
-        time.sleep(1)
-    return sorted(list(links))
-
-def extract_dois_from_story(url):
-    """Extract DOIs and story title from a Scimex article page"""
+def fetch_webpage(url):
+    """Fetch webpage content."""
     try:
-        headers = {
-            "User-Agent": "Mozilla/5.0"
-        }
-        resp = requests.get(url, headers=headers, timeout=15)
-        soup = BeautifulSoup(resp.text, 'html.parser')
+        response = requests.get(url, timeout=10)
+        response.raise_for_status()
+        return response.text
+    except requests.exceptions.RequestException as e:
+        return None
 
-        # Get the story title
-        title_tag = soup.find("h1", class_="title")
-        title = title_tag.get_text(strip=True) if title_tag else "Unknown Title"
+def extract_text(html):
+    """Extract full content from <h4> elements."""
+    soup = BeautifulSoup(html, "html.parser")
+    headers = [h.get_text(strip=True) for h in soup.find_all("h4")]
+    return "\n".join(headers)
 
-        # Look inside all div.item elements for DOIs
-        dois = []
-        for div in soup.find_all("div", class_="item"):
-            text = div.get_text()
-            found = re.findall(r'10\.\d{4,9}/[-._;()/:A-Z0-9]+', text, re.IGNORECASE)
-            dois.extend([doi.lower() for doi in found])
+def extract_names_and_orgs(text):
+    """Extract names and organizations from text."""
+    people = []
+    lines = text.split('\n')
 
-        return title, list(set(dois))  # remove duplicates
-    except Exception as e:
-        st.warning(f"Error scraping {url}: {e}")
-        return "Error", []
+    for line in lines:
+        match = re.match(
+            r'(?:(?:Dr|Emeritus Professor|Professor|Associate Professor|Mr|Ms|Distinguished Professor|Honorary Fellow|Adjunct Associate Professor|Adjunct Professor|Adjunct Assoc Prof)\s+)?'  # Title is now optional
+            r'([A-Za-z-\.\s]+?)\s+is.*?(?:at|at the)\s+([A-Za-z\s\-&]+)',  # Name + Organization
+            line
+        )
+        if match:
+            name = match.group(1).strip()
+            organization = match.group(2).strip()
+            people.append((name, organization))
 
-# --- Streamlit App UI ---
-st.title("🔬 Scimex Retraction Checker")
-st.markdown("This app checks Scimex stories for DOIs that appear on the [Retraction Watch](https://retractionwatch.com) list.")
+    return people
 
-pages = st.slider("How many pages of Scimex stories to check?", 1, 20, 5)
+def generate_boolean_search(people):
+    """Generate a Boolean search query."""
+    boolean_parts = []
+    name_only_parts = []
+    
+    for name, org in people:
+        first_name = name.split()[0]
+        org = re.sub(r'^The\s+', '', org, flags=re.IGNORECASE)  # Remove 'The' at the start of organization name
+        search_part = f'(medium:Radio AND (("{name}" OR (("{first_name}") NEAR/10 ("{org}")))))'
+        boolean_parts.append(search_part)
+        name_only_parts.append(f'"{name}"')
+    
+    boolean_query = ' OR \n'.join(boolean_parts)
+    name_only_query = ' OR '.join(name_only_parts)
+    
+    return boolean_query, name_only_query
 
-if st.button("🔍 Run check"):
-    with st.spinner("Loading Retraction Watch DOIs..."):
-        retracted_dois = load_retracted_dois()
-        st.success(f"Loaded {len(retracted_dois):,} retracted DOIs.")
+# Streamlit UI
+st.title("Lyndal's Media Monitoring Boolean Search Generator for ERs")
 
-    with st.spinner("Fetching Scimex story links..."):
-        story_links = get_story_links(pages)
-        st.info(f"Found {len(story_links)} stories to scan.")
+url = st.text_input("Enter Webpage URL")
 
-    matches = []
-    progress = st.progress(0)
-    for i, link in enumerate(story_links):
-        title, found_dois = extract_dois_from_story(link)
-        for doi in found_dois:
-            if doi in retracted_dois:
-                matches.append({
-                    "Title": title,
-                    "DOI": doi,
-                    "URL": link
-                })
-        progress.progress((i + 1) / len(story_links))
-        time.sleep(0.5)
+if st.button("Generate Boolean Search"):
+    html = fetch_webpage(url)
+    if html:
+        text = extract_text(html)
+        people = extract_names_and_orgs(text)
+        boolean_query, name_only_query = generate_boolean_search(people)
 
-    if matches:
-        st.success(f"⚠️ Found {len(matches)} stories with retracted DOIs.")
-        result_df = pd.DataFrame(matches)
-        st.dataframe(result_df, use_container_width=True)
+        st.subheader("Boolean Search Query")
+        st.code(boolean_query, language="text")
 
-        csv = result_df.to_csv(index=False).encode("utf-8")
-        st.download_button("⬇️ Download results as CSV", csv, "retracted_on_scimex.csv", "text/csv")
+        st.subheader("Name-Only Boolean Query")
+        st.code(name_only_query, language="text")
     else:
-        st.success("✅ No retracted DOIs found on Scimex stories.")
+        st.error("Failed to fetch webpage.")
